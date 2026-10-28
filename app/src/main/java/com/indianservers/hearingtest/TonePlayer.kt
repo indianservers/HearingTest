@@ -6,6 +6,7 @@ import android.media.MediaPlayer
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.util.Log
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -13,14 +14,17 @@ import kotlin.math.cos
 import kotlin.math.sin
 
 /** Original MP3 bytes go directly to the platform decoder. No pitch, rate or gain boost. */
-internal class TonePlayer(private val context: Context) {
+internal class TonePlayer(
+    private val context: Context,
+    private val createPlayer: () -> MediaPlayer = { MediaPlayer() }
+) {
     private val handler = Handler(Looper.getMainLooper())
     private var active: Session? = null
     private var generation = 0
     private var requestedVolume = .08f
     private var requestedEar = 1
 
-    private class Session(val player: MediaPlayer, val token: Int) {
+    private class Session(val player: MediaPlayer, val token: Int, val done: (String?) -> Unit) {
         var left = 0f
         var right = 0f
         var ready = false
@@ -32,8 +36,29 @@ internal class TonePlayer(private val context: Context) {
     private fun release(session: Session) {
         if (session.released) return
         session.released = true
+        handler.removeCallbacksAndMessages(session)
+        session.player.setOnPreparedListener(null)
+        session.player.setOnCompletionListener(null)
+        session.player.setOnErrorListener(null)
         session.player.release()
         if (active === session) active = null
+    }
+
+    private fun fail(session: Session, cause: Exception? = null) {
+        if (session.released) return
+        Log.e("TonePlayer", "Tone playback failed", cause)
+        release(session)
+        if (session.token == generation) session.done("Unable to play this tone. No response was recorded.")
+    }
+
+    // Decoder failures can also occur after prepareAsync returns, in a posted callback.
+    private fun safely(session: Session, action: () -> Unit) {
+        if (session.released) return
+        try { action() } catch (failure: Exception) { fail(session, failure) }
+    }
+
+    private fun later(session: Session, delay: Long, action: () -> Unit) {
+        handler.postAtTime({ safely(session, action) }, session, SystemClock.uptimeMillis() + delay)
     }
 
     // Raised-cosine envelope avoids abrupt amplitude changes, including volume adjustments.
@@ -48,8 +73,10 @@ internal class TonePlayer(private val context: Context) {
             val blend = ((1 - cos(Math.PI * fraction)) / 2).toFloat()
             session.left = fromLeft + (left - fromLeft) * blend
             session.right = fromRight + (right - fromRight) * blend
-            session.player.setVolume(session.left, session.right)
-            if (fraction < 1f) handler.postDelayed({ step() }, 5) else complete()
+            safely(session) {
+                session.player.setVolume(session.left, session.right)
+                if (fraction < 1f) later(session, 5) { step() } else complete()
+            }
         }
         step()
     }
@@ -81,13 +108,14 @@ internal class TonePlayer(private val context: Context) {
         // Finish the previous fade before starting another tone.
         handler.postDelayed({
             if (token != generation) return@postDelayed
-            val session = Session(MediaPlayer(), token)
+            val mediaPlayer = try { createPlayer() } catch (failure: Exception) {
+                Log.e("TonePlayer", "Unable to create audio player", failure)
+                done("Unable to play this tone. No response was recorded.")
+                return@postDelayed
+            }
+            val session = Session(mediaPlayer, token, done)
             val next = session.player
             active = session
-            fun fail() {
-                release(session)
-                if (token == generation) done("Unable to play this tone. No response was recorded.")
-            }
             try {
                 next.setAudioAttributes(AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -99,29 +127,35 @@ internal class TonePlayer(private val context: Context) {
                         next.setDataSource(it.fileDescriptor, it.startOffset, it.length)
                     }
                 } else next.setDataSource(lowTone(hz).absolutePath)
-                next.setOnErrorListener { _, _, _ -> fail(); true }
+                next.setOnErrorListener { _, what, extra ->
+                    fail(session, IllegalStateException("MediaPlayer error $what/$extra")); true
+                }
                 next.setOnCompletionListener {
+                    if (session.released) return@setOnCompletionListener
                     release(session)
                     if (token == generation) done(null)
                 }
                 next.setOnPreparedListener {
+                    if (session.released) return@setOnPreparedListener
                     if (token != generation) { release(session); return@setOnPreparedListener }
-                    session.ready = true
-                    // Default playback speed and pitch remain 1.0. No PlaybackParams/effects.
-                    next.start()
-                    volume(requestedVolume, requestedEar)
-                    handler.postDelayed({
-                        if (!session.released && token == generation && !session.ending) onReady()
-                    }, 500)
-                    handler.postDelayed({
-                        if (!session.released && token == generation) {
-                            session.ending = true
-                            ramp(session, 0f, 0f)
+                    safely(session) {
+                        session.ready = true
+                        // Default playback speed and pitch remain 1.0. No PlaybackParams/effects.
+                        next.start()
+                        volume(requestedVolume, requestedEar)
+                        later(session, 500) {
+                            if (!session.released && token == generation && !session.ending) onReady()
                         }
-                    }, (next.duration - 65).coerceAtLeast(500).toLong())
+                        later(session, (next.duration - 65).coerceAtLeast(500).toLong()) {
+                            if (!session.released && token == generation) {
+                                session.ending = true
+                                ramp(session, 0f, 0f)
+                            }
+                        }
+                    }
                 }
                 next.prepareAsync()
-            } catch (_: Exception) { fail() }
+            } catch (failure: Exception) { fail(session, failure) }
         }, 50)
     }
 

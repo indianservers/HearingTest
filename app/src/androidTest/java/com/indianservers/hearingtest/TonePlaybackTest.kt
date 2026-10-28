@@ -10,6 +10,52 @@ import java.util.concurrent.atomic.AtomicReference
 class TonePlaybackTest {
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
 
+    @Test fun asynchronousStartFailureReportsErrorWithoutCrashing() {
+        val complete = CountDownLatch(1)
+        val failure = AtomicReference<String?>(null)
+        val ready = CountDownLatch(1)
+        lateinit var player: TonePlayer
+        instrumentation.runOnMainSync {
+            player = TonePlayer(instrumentation.targetContext) {
+                object : android.media.MediaPlayer() {
+                    override fun start() { throw IllegalStateException("Simulated decoder failure") }
+                }
+            }
+            player.play(8000, 0f, 1, onReady = { ready.countDown() },
+                done = { failure.set(it); complete.countDown() })
+        }
+        try {
+            assertTrue("Failure was not reported", complete.await(10, TimeUnit.SECONDS))
+            assertNotNull(failure.get())
+            assertEquals("A failed tone must not unlock responses", 1L, ready.count)
+        } finally { instrumentation.runOnMainSync { player.dispose() } }
+    }
+
+    @Test fun lowToneCompletesAfterRapidToneChanges() {
+        val complete = CountDownLatch(1)
+        val ready = CountDownLatch(1)
+        val stale = CountDownLatch(1)
+        val failure = AtomicReference<String?>(null)
+        lateinit var player: TonePlayer
+        instrumentation.runOnMainSync {
+            player = TonePlayer(instrumentation.targetContext)
+            repeat(20) {
+                player.play(8000, 0f, it % 3, onReady = { stale.countDown() },
+                    done = { stale.countDown() })
+            }
+            player.play(250, 0f, 1, onReady = {
+                player.volume(0f, 2)
+                ready.countDown()
+            }, done = { failure.set(it); complete.countDown() })
+        }
+        try {
+            assertTrue(ready.await(10, TimeUnit.SECONDS))
+            assertTrue(complete.await(10, TimeUnit.SECONDS))
+            assertNull(failure.get())
+            assertEquals("Replaced tones fired callbacks", 1L, stale.count)
+        } finally { instrumentation.runOnMainSync { player.dispose() } }
+    }
+
     @Test fun originalMp3sDecodeAndCompleteWithoutErrors() {
         val context = instrumentation.targetContext
         val tones = context.assets.list("tones")!!.filter { it.endsWith(".mp3") }

@@ -61,7 +61,7 @@ class MainActivity : ComponentActivity() {
     var playing by remember { mutableStateOf(false) }
     var played by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    var answers by remember { mutableStateOf(prefs.all.filterKeys { it.contains(":") }.mapValues { it.value as String }) }
+    var answers by remember { mutableStateOf(validResponses(prefs.all)) }
     val player=remember { TonePlayer(context) }
     fun stop() { player.stop(); playing=false }
     fun record(heard: Boolean) { val key="$ear:$hz"; val value=if(heard) volume.toString() else "no"; answers=answers+(key to value); prefs.edit().putString(key,value).apply(); stop(); played=false }

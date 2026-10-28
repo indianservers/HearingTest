@@ -1,0 +1,31 @@
+Hearing Test 1.0.1 (version code 2) - verified 28 October 2026
+
+Release startup failure reproduced on Android 15 emulator:
+IllegalAccessError: Class kotlin.collections.c extended by class uc is inaccessible.
+See release-startup-crash.txt. The partial packageScope optimization configuration
+was replaced with full-program R8 optimization and the standard optimized rules.
+
+Additional fixes:
+- Validate stored response keys, types and volumes before displaying results.
+  The original debug APK crashed with ClassCastException when a response was an Int.
+- Catch asynchronous MediaPlayer exceptions and cancel callbacks on release.
+
+Validation:
+- testDebugUnitTest: 2 tests passed.
+- connectedDebugAndroidTest: 6 tests passed on Android 15 emulator.
+  Includes all 13 MP3s, generated low tone, rapid replacement/cancellation,
+  simulated asynchronous decoder failure, invalid saved data and recreation.
+- lintDebug and release lint: no errors.
+- assembleRelease and bundleRelease succeeded.
+- Final full-program optimized release APK (debug key used only for emulator testing):
+  startup, Results, About, sustained tone playback, response unlock and completion
+  passed; process remained alive with no AndroidRuntime or TonePlayer errors.
+
+Release bundle: app/build/outputs/bundle/release/app-release.aab
+This bundle is unsigned. Generate a signed release with the existing upload key
+in Android Studio before Play submission. app/release/app-release.aab is the old
+version and was deliberately not overwritten.
+
+Google's reviewer screenshot has no stack trace, so the exact reviewer failure
+cannot be proven to match the reproduced release crash. Physical-device and
+Google Play pre-launch testing remain useful before resubmission.
